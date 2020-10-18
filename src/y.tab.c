@@ -1404,7 +1404,7 @@ yyreduce:
 #line 123 "src/parser.y"
     {
 	YPRINTF("token: Matched rule 1.\n");
-	//snprintf($$, 8192, "%c", $1);
+	snprintf((yyval.str), 8192, "%c", (yyvsp[(1) - (1)].i));
 }
     break;
 
@@ -1415,7 +1415,7 @@ yyreduce:
 	memcpy((yyval.str), (yyvsp[(1) - (2)].str), strlen((yyvsp[(1) - (2)].str)));
 	(yyval.str)[strlen((yyvsp[(1) - (2)].str))] = (yyvsp[(2) - (2)].i);
 	(yyval.str)[strlen((yyvsp[(1) - (2)].str)) + 1] = 0;
-    // //snprintf($$, 8192, "%s%c", $1, $2);
+    // snprintf($$, 8192, "%s%c", $1, $2);
 }
     break;
 
@@ -1444,7 +1444,7 @@ yyreduce:
 #line 171 "src/parser.y"
     {
 	YPRINTF("text: Matched rule 1.\n");
-	//snprintf($$, 8192, "%c", $1);
+	snprintf((yyval.str), 8192, "%c", (yyvsp[(1) - (1)].i));
 }
     break;
 
@@ -1456,7 +1456,7 @@ yyreduce:
 	memcpy((yyval.str) + strlen((yyvsp[(1) - (3)].str)), (yyvsp[(2) - (3)].str), strlen((yyvsp[(2) - (3)].str)));
 	(yyval.str)[strlen((yyvsp[(1) - (3)].str)) + strlen((yyvsp[(2) - (3)].str))] = (yyvsp[(3) - (3)].i);
 	(yyval.str)[strlen((yyvsp[(1) - (3)].str)) + strlen((yyvsp[(2) - (3)].str)) + 1] = 0;
-	// //snprintf($$, 8192, "%s%s%c", $1, $2, $3);
+	// snprintf($$, 8192, "%s%s%c", $1, $2, $3);
 }
     break;
 
@@ -1472,7 +1472,7 @@ yyreduce:
 #line 191 "src/parser.y"
     {
 	YPRINTF("OWS: Matched rule 2\n");
-	//snprintf($$, 8192, "%c", $1);
+	snprintf((yyval.str), 8192, "%c", (yyvsp[(1) - (1)].i));
 }
     break;
 
@@ -1480,7 +1480,7 @@ yyreduce:
 #line 195 "src/parser.y"
     {
 	YPRINTF("OWS: Matched rule 3\n");
-	//snprintf($$, 8192, "%s", $1);
+	snprintf((yyval.str), 8192, "%s", (yyvsp[(1) - (1)].str));
 }
     break;
 

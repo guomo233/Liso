@@ -1,12 +1,12 @@
 cp1_checker.py
 cp2
 cp3
-sample_request_realistic
-sample_request_example
+cgi-bin
 lisod
-liso.log
 obj
 www
+*.log
 *.crt
 *.csr
 *.key
+*.lock

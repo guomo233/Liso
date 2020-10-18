@@ -1,0 +1,82 @@
+#include <stdlib.h>
+#include "fdpool.h"
+
+static int max (int a, int b)
+{
+	return a > b ? a : b ;
+}
+
+static void swap (int *a, int *b)
+{
+	int tmp = *a ;
+	*a = *b ;
+	*b = tmp ;
+}
+
+void fdpool_init (fd_pool *fdp)
+{
+	FD_ZERO (&fdp->read_set) ;
+	FD_ZERO (&fdp->write_set) ;
+	fdp->n_fd = 0 ;
+	fdp->maxfd = 0 ;
+}
+
+void fdpool_add (fd_pool *fdp, int fd, int type)
+{
+	if (!FD_ISSET(fd, &fdp->read_set) && !FD_ISSET(fd, &fdp->write_set))
+	{
+		fdp->maxfd = max (fdp->maxfd, fd) ;
+		fdp->fd[fdp->n_fd++] = fd ;
+	}
+	
+	if (type & READ_FD)
+		FD_SET (fd, &fdp->read_set) ;
+		
+	if (type & WRITE_FD)
+		FD_SET (fd, &fdp->write_set) ;
+}
+
+void fdpool_remove (fd_pool *fdp, int fd, int type)
+{
+	int i ;
+	
+	if (!FD_ISSET(fd, &fdp->read_set) && !FD_ISSET(fd, &fdp->write_set))
+		return ;
+	
+	if (type & READ_FD)
+		FD_CLR (fd, &fdp->read_set) ;
+
+	if (type & WRITE_FD)
+		FD_CLR (fd, &fdp->write_set) ;
+	
+	if (!FD_ISSET(fd, &fdp->read_set) && !FD_ISSET(fd, &fdp->write_set))
+	{
+		// TODO use heap
+		fdp->maxfd = 0 ;
+		for (i = 0; i < fdp->n_fd; i++)
+		{
+			if (fdp->fd[i] == fd)
+				swap (&fdp->fd[i], &fdp->fd[--fdp->n_fd]) ;
+			
+			if (i < fdp->n_fd)
+				fdp->maxfd = max (fdp->maxfd, fdp->fd[i]) ;
+		}
+	}
+}
+
+bool readable (fd_pool *fdp, int fd)
+{
+	return FD_ISSET (fd, &fdp->ready_read) ;
+}
+
+bool writeable (fd_pool *fdp, int fd)
+{
+	return FD_ISSET (fd, &fdp->ready_write) ;
+}
+
+void wait_event (fd_pool *fdp)
+{
+	fdp->ready_read = fdp->read_set ;
+	fdp->ready_write = fdp->write_set ;
+	select (fdp->maxfd + 1, &fdp->ready_read, &fdp->ready_write, NULL, NULL) ;
+}

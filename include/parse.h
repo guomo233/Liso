@@ -6,8 +6,8 @@
 #include <stdlib.h>
 
 #define SUCCESS 0
-#define BAD_REQ 1
-#define REQ_UNFIN 2
+#define BAD_REQ -1
+#define REQ_UNFIN 1
 
 //Header field
 typedef struct

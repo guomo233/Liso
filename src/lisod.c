@@ -20,63 +20,42 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/mman.h>
+#include <signal.h>
+#include <sys/stat.h>
 #include <openssl/ssl.h>
-#include "parse.h"
 #include "cpool.h"
+#include "fdpool.h"
+#include "cio.h"
 #include "http.h"
 #include "log.h"
 
-#ifdef __APPLE__
-#include <sys/uio.h>
-static ssize_t _sendfile (int out_fd, int in_fd, off_t *offset, size_t count)
-{
-    off_t len = count ;
-    
-    if (sendfile(in_fd, out_fd, *offset, &len, NULL, 0) < 0)
-        return -1 ;
-    else
-    {
-        *offset += len ;
-        return len ;
-    }
-}
-#else
-#include <sys/sendfile.h>
-#define _sendfile sendfile
-#endif
-
-#define MAX_SEND 4096
-#define MAX_RECV 4096
-
-static client_pool pool ;
-static fd_set read_set, write_set ;
+static client_pool cpool ;
+static fd_pool fdp ;
 static int http_listenfd, https_listenfd ;
 static SSL_CTX *ssl_ctx ;
-char *lock_file, *www_folder, *cgi_path ;
+char *www_folder, *cgi_folder ;
+int http_port, https_port ;
 FILE *logfile ;
 
-static int min (int a, int b)
-{
-    return a < b ? a : b ;
-}
-
-static int max (int a, int b)
-{
-    return a > b ? a : b ;
-}
-
-int close_socket(int sock)
+static int close_socket(int sock)
 {
     if (close(sock))
     {
-        LOG_ERROR("Failed closing socket.\n");
+        LOG_ERROR("Failed closing socket.");
         return 1;
     }
     return 0;
 }
 
-int open_listenfd (int port)
+static void server_shutdown (int state)
+{
+    if (http_listenfd > 0) close_socket (http_listenfd) ;
+    if (https_listenfd > 0) close_socket (https_listenfd) ;
+    if (ssl_ctx) SSL_CTX_free (ssl_ctx) ;
+    exit (state) ;
+}
+
+static int open_listenfd (int port)
 {
     int sock, optval ;
     struct sockaddr_in addr;
@@ -111,101 +90,179 @@ int open_listenfd (int port)
     return sock ;
 }
 
-SSL_CTX * ssl_init (const char *cert_path, const char *pkey_path)
+static void ssl_init (const char *cert_path, const char *pkey_path)
 {
-    SSL_CTX *ctx ;
-    
     SSL_library_init();
-    if ((ctx = SSL_CTX_new(TLSv1_server_method())) == NULL)
+    if ((ssl_ctx = SSL_CTX_new(TLSv1_server_method())) == NULL)
     {
         LOG_ERROR ("Faild to create SSL context create.") ;
-        return NULL ;
+        server_shutdown (EXIT_FAILURE) ;
     }
     
-    if (SSL_CTX_use_certificate_file(ctx, cert_path, SSL_FILETYPE_PEM) < 0)
+    if (SSL_CTX_use_certificate_file(ssl_ctx, cert_path, SSL_FILETYPE_PEM) < 0)
     {
         LOG_ERROR ("Faild to load certificate file.") ;
-        return NULL ;
+        server_shutdown (EXIT_FAILURE) ;
     }
     
-    if (SSL_CTX_use_PrivateKey_file(ctx, pkey_path, SSL_FILETYPE_PEM) < 0)
+    if (SSL_CTX_use_PrivateKey_file(ssl_ctx, pkey_path, SSL_FILETYPE_PEM) < 0)
     {
         LOG_ERROR ("Faild to load private key file.") ;
-        return NULL ;
+        server_shutdown (EXIT_FAILURE) ;
     }
     
-    if (!SSL_CTX_check_private_key(ctx))
+    if (!SSL_CTX_check_private_key(ssl_ctx))
     {
         LOG_ERROR ("Private key and certificate don't match.") ;
-        return NULL ;
+        server_shutdown (EXIT_FAILURE) ;
     }
-    
-    return ctx ;
 }
 
-int server_init (int argc, char* argv[])
+static void signal_handler (int sig)
 {
-    int http_port, https_port ;
-    const char *cert_path, *pkey_path ;
+    switch(sig)
+    {
+    case SIGHUP:
+        // TODO rehash the server
+        break ;
+    case SIGTERM: server_shutdown (EXIT_SUCCESS) ;
+    default: LOG_ERROR ("Unhandled signal [%d].", sig) ;
+    }       
+}
+
+static void daemonize (const char *lock_file, const int log_fd)
+{
+    int i, stdin_fd, lock_fd ;
+    char pid[8] ;
+    
+    switch (fork())
+    {
+    case -1:
+        LOG_ERROR ("Faild to fork.") ;
+        server_shutdown (EXIT_FAILURE) ;
+    case 0: break ;
+    default: server_shutdown (EXIT_SUCCESS) ;
+    }
+    
+    if (setsid() < 0)
+    {
+        LOG_ERROR ("Faild to create new session.") ;
+        server_shutdown (EXIT_FAILURE) ;
+    }
+    
+    switch (fork())
+    {
+    case -1:
+        LOG_ERROR ("Faild to fork.") ;
+        server_shutdown (EXIT_FAILURE) ;
+    case 0: break ;
+    default: server_shutdown (EXIT_SUCCESS) ;
+    }
+    
+    umask(027);
+    
+    for (i = getdtablesize(); i>=0; i--)
+        if (i != log_fd)
+            close(i);
+
+    stdin_fd = open("/dev/null", O_RDWR) ;
+    if (stdin_fd != STDIN_FILENO)
+    {
+        LOG_ERROR ("Faild to reopen STDIN_FILENO to /dev/null.") ;
+        server_shutdown (EXIT_FAILURE) ;
+    }
+    if (dup2 (STDIN_FILENO, STDOUT_FILENO) != STDOUT_FILENO)
+    {
+        LOG_ERROR ("Faild to reopen STDOUT_FILENO to /dev/null.") ;
+        server_shutdown (EXIT_FAILURE) ;
+    }
+    if (dup2 (STDIN_FILENO, STDERR_FILENO) != STDERR_FILENO)
+    {
+        LOG_ERROR ("Faild to reopen STDERR_FILENO to /dev/null.") ;
+        server_shutdown (EXIT_FAILURE) ;
+    }
+    
+    if ((lock_fd = open (lock_file, O_RDWR | O_CREAT, 0640)) < 0)
+    {
+        LOG_ERROR ("Faild to open lock file [%s].", lock_file) ;
+        server_shutdown (EXIT_FAILURE) ;
+    }
+    
+    if (lockf(lock_fd, F_TLOCK, 0) < 0)
+    {
+        LOG_ERROR ("Faild to lock file [%s].", lock_file) ;
+        server_shutdown (EXIT_SUCCESS) ;
+    }
+    
+    sprintf (pid, "%d\n", getpid());
+    if (write (lock_fd, pid, strlen(pid)) < 0)
+    {
+        LOG_ERROR ("Faild to write pid to lock file [%s].", lock_file) ;
+        server_shutdown (EXIT_FAILURE) ;
+    }
+    
+    signal (SIGCHLD, SIG_IGN) ;
+    signal (SIGHUP, signal_handler) ;
+    signal (SIGTERM, signal_handler) ;
+}
+
+static void server_init (int argc, char* argv[])
+{
+    const char *cert_path, *pkey_path, *lock_file ;
     
     if (argc != 9)
     {
         fprintf (stderr, "Usage: lisod <HTTP port> <HTTPS port> <log file> <lock file> <www folder> <CGI script path> <private key file> <certificate file>\n") ;
-        return -1 ;
+        server_shutdown (EXIT_SUCCESS) ;
     }
     
     lock_file = argv[4] ;
     www_folder = argv[5] ;
-    cgi_path = argv[6] ;
+    cgi_folder = argv[6] ;
     pkey_path = argv[7] ;
     cert_path = argv[8] ;
     
     if ((logfile = fopen (argv[3], "a")) == NULL)
     {
         fprintf (stderr, "Log file can not open.\n") ;
-        return -1 ;
+        server_shutdown (EXIT_FAILURE) ;
     }
     
     http_port = atoi (argv[1]) ;
     if (!http_port)
     {
         LOG_ERROR ("The format of HTTP port error.") ;
-        return -1 ;
+        server_shutdown (EXIT_SUCCESS) ;
     }
     
     https_port = atoi (argv[2]) ;
     if (!https_port)
     {
         LOG_ERROR ("The format of HTTPS port error.") ;
-        return -1 ;
+        server_shutdown (EXIT_SUCCESS) ;
     }
+    
+    daemonize (lock_file, fileno(logfile)) ;
     
     if ((http_listenfd = open_listenfd(http_port)) < 0)
     {
         LOG_ERROR ("Open listen fd faild.") ;
-        return -1 ;
+        server_shutdown (EXIT_FAILURE) ;
     }
     
     if ((https_listenfd = open_listenfd(https_port)) < 0)
     {
         LOG_ERROR ("Open listen fd faild.") ;
-        return -1 ;
+        server_shutdown (EXIT_FAILURE) ;
     }
     
-    FD_SET (http_listenfd, &read_set) ;
-    FD_SET (https_listenfd, &read_set) ;
+    ssl_init (cert_path, pkey_path) ;
     
-    if ((ssl_ctx = ssl_init(cert_path, pkey_path)) == NULL)
-    {
-        LOG_ERROR ("Faild to initialize SSL.") ;
-        return -1 ;
-    }
+    fdpool_init (&fdp) ;
+    fdpool_add (&fdp, http_listenfd, READ_FD) ;
+    fdpool_add (&fdp, https_listenfd, READ_FD) ;
     
-    pool_init (&pool, &read_set, &write_set) ;
-    
-    fprintf(stdout, "----- Liso Server -----\n");
-    LOG_INFO ("[Server start] HTTP port: %d HTTPS prot: %d", http_port, https_port) ;
-    return 0 ;
+    LOG_INFO ("Server start HTTP port [%d] HTTPS prot [%d].", http_port, https_port) ;
 }
 
 // For cp1
@@ -215,209 +272,207 @@ int server_init (int argc, char* argv[])
 //    resp_buf->size = req_buf->size ;
 //}
 
-void handle_clients (fd_set *ready_read, fd_set *ready_write)
+static void handle_clients ()
 {
-    int i, cfd, parse_ret, ret ;
-    size_t remain ;
-    const char *body_size ;
-    char *f_mmap ;
+    int i, ret ;
+    int remain ;
+    CGI *cgi ;
     resp_buffer *resp_buf ;
     req_buffer *req_buf ;
     SSL *ssl ;
     
-    for (i = 0; i < pool.n_cli; i++)
+    for (i = 0; i < cpool.n_cli; i++)
     {
-        if (FD_ISSET(pool.cli[i].fd, ready_read) && !pool.cli[i].resp_buf.close)
+        if (!cpool.cli[i].close && readable(&fdp, cpool.cli[i].fd))
         {
-            req_buf = &pool.cli[i].req_buf ;
-            resp_buf = &pool.cli[i].resp_buf ;
-            cfd = pool.cli[i].fd ;
-            ssl = pool.cli[i].ssl ;
-            
-            remain = req_buf->capacity - req_buf->size ;
-            if (remain <= 0)
-            {
-                LOG_ERROR ("Size of request buffer out of range.") ;
-                // TODO reply
-                continue ;
-            }
-            
-            if (ssl)
-                ret = SSL_read(ssl, req_buf->buf + req_buf->size, min (MAX_RECV, remain));
-            else
-                ret = recv(cfd, req_buf->buf + req_buf->size, min (MAX_RECV, remain), 0) ;
+            ret = read_req (cpool.cli[i].fd, &cpool.cli[i].req_buf, cpool.cli[i].ssl) ;
             if (ret < 0)
             {
-                LOG_ERROR("Error reading from client socket.\n");
-                // TODO reply
+                write_resp (500, NULL, &cpool.cli[i].resp_buf) ;
                 continue ;
             }
             else if (ret == 0)
             {
                 LOG_INFO ("Client shutdown.") ;
-                resp_buf->close = true ;
+                cpool.cli[i].close = true ;
                 continue ;
             }
             
-            LOG_INFO ("Received %d bytes.", ret) ;
-            req_buf->size += ret ;
-            if (!req_buf->req)
+            if (parse_req (&cpool.cli[i].req_buf) < 0)
             {
-                req_buf->req = parse (req_buf->buf, min(req_buf->size, 8192), &req_buf->header_size, &parse_ret) ;
-                if (req_buf->req)
-                {
-                    body_size = get_header (req_buf->req, "Content-Length") ;
-                    req_buf->body_size = body_size ? atoi (body_size) : 0 ;
-                    // TODO check valid of content length
-                }
-                else if (req_buf->size > 8192 || parse_ret == BAD_REQ)
-                // TODO receive is done ( < 8192) but can not parse
-                    send_resp (400, NULL, resp_buf) ;
+                write_resp (400, NULL, &cpool.cli[i].resp_buf) ;
+                continue ;
             }
             
-            if (req_buf->req && req_buf->size >= req_buf->header_size + req_buf->body_size)
-                handle_request (req_buf, resp_buf) ;
+            if (req_read_done(&cpool.cli[i].req_buf))
+            {
                 // handle_echo (req_buf, resp_buf) ; // For cp1
-            
-            if (resp_buf->size - resp_buf->offset > 0 || 
-                 resp_buf->fd > 0)
-                FD_SET (cfd, &write_set) ;
+                cpool.cli[i].close = handle_request (&cpool.cli[i].req_buf, &cpool.cli[i].resp_buf) ;
+                
+                if (resp_tobe_send(&cpool.cli[i].resp_buf))
+                    fdpool_add (&fdp, cpool.cli[i].fd, WRITE_FD) ;
+                    
+                if (cpool.cli[i].resp_buf.cgi)
+                {
+                    if (cpool.cli[i].req_buf.body_size > 0)
+                    {
+                        cpool.cli[i].req_buf.offset = cpool.cli[i].req_buf.header_size ;
+                        fdpool_add (&fdp, cpool.cli[i].resp_buf.cgi->out, WRITE_FD) ;
+                    }
+                    fdpool_add (&fdp, cpool.cli[i].resp_buf.cgi->in, READ_FD) ;
+                }
+            }
         }
         
-        if (FD_ISSET(pool.cli[i].fd, ready_write))
+        if (writeable(&fdp, cpool.cli[i].fd))
         {
-            req_buf = &pool.cli[i].req_buf ;
-            resp_buf = &pool.cli[i].resp_buf ;
-            cfd = pool.cli[i].fd ;
-            ssl = pool.cli[i].ssl ;
+            if (send_resp (cpool.cli[i].fd, &cpool.cli[i].resp_buf, cpool.cli[i].ssl) < 0)
+            {
+                LOG_ERROR("Error sending to client socket.");
+                write_resp (500, NULL, &cpool.cli[i].resp_buf) ;
+                continue ;
+            }
             
-            remain = resp_buf->size - resp_buf->offset ;
+            if (!resp_tobe_send(&cpool.cli[i].resp_buf))
+                fdpool_remove (&fdp, cpool.cli[i].fd, WRITE_FD) ;
+            
+            if (resp_send_done(&cpool.cli[i].resp_buf))
+            {
+                clr_req_buf (&cpool.cli[i].req_buf) ;
+                clr_resp_buf (&cpool.cli[i].resp_buf) ;
+                
+                if (cpool.cli[i].close)
+                {
+                    cpool_remove (&cpool, i) ;
+                    fdpool_remove (&fdp, cpool.cli[i].fd, READ_FD) ;
+                    close (cpool.cli[i].fd) ;
+                }
+            }
+        }
+        
+        if (cpool.cli[i].resp_buf.cgi && readable(&fdp, cpool.cli[i].resp_buf.cgi->in))
+        {
+            cgi = cpool.cli[i].resp_buf.cgi ;
+            resp_buf = &cpool.cli[i].resp_buf ;
+            
+            remain = resp_buf->capacity - resp_buf->size ;
+            if (remain <= 0)
+            {
+                LOG_ERROR ("Size of response buffer out of range.") ;
+                // TODO reply
+                continue ;
+            }
+            
+            ret = read(cgi->in, resp_buf->buf + resp_buf->size, remain) ;
+            if (ret < 0)
+            {
+                LOG_ERROR("Error reading to CGI.\n");
+                // TODO reply
+                continue ;
+            }
+            else if (ret == 0)
+            {
+                fdpool_remove (&fdp, cgi->in, READ_FD) ;
+                close (cgi->in) ;
+                cgi->in_done = true ;
+                continue ;
+            }
+            
+            resp_buf->size += ret ;
+            fdpool_add (&fdp, cpool.cli[i].fd, WRITE_FD) ;
+            LOG_INFO ("Received %d bytes from CGI.", ret) ;
+        }
+        
+        if (cpool.cli[i].resp_buf.cgi && writeable(&fdp, cpool.cli[i].resp_buf.cgi->out))
+        {
+            req_buf = &cpool.cli[i].req_buf ;
+            resp_buf = &cpool.cli[i].resp_buf ;
+            ssl = cpool.cli[i].ssl ;
+            cgi = resp_buf->cgi ;
+            
+            remain = req_buf->header_size + req_buf->body_size - req_buf->offset ;
             if (remain > 0)
             {
-                if (ssl)
-                    ret = SSL_write(ssl, resp_buf->buf + resp_buf->offset, min(MAX_SEND, remain)) ;
-                else
-                    ret = send(cfd, resp_buf->buf + resp_buf->offset, min(MAX_SEND, remain), 0) ;
+                ret = write (cgi->out, req_buf->buf + req_buf->offset, remain) ;
                 if (ret < 0)
                 {
-                    LOG_ERROR("Error sending to client socket.\n");
+                    LOG_ERROR("Error writing to CGI.\n");
                     // TODO reply
                     continue ;
                 }
                 
-                LOG_INFO ("Send %d bytes.", ret) ;
-                resp_buf->offset += ret ;
-                if (resp_buf->size == resp_buf->offset)
-                    clr_resp_buf (resp_buf, BUF_CLR) ;
+                req_buf->offset += ret ;
+                LOG_INFO ("Send %d bytes to CGI.", ret) ;
             }
             
-            if (resp_buf->size == 0 && resp_buf->fd > 0)
+            if (req_buf->offset >= req_buf->header_size + req_buf->body_size)
             {
-                if (ssl)
-                {
-                    // TODO use KTLS
-                    remain = resp_buf->f_size - resp_buf->f_offset ;
-                    f_mmap = mmap (NULL, remain, PROT_READ, MAP_PRIVATE, resp_buf->fd, resp_buf->f_offset) ;
-                    if ((ret = SSL_write(ssl, f_mmap, min(MAX_SEND, remain))) < 0)
-                    {
-                        LOG_ERROR("Error sending to client socket.\n");
-                        send_resp (500, NULL, resp_buf) ;
-                        continue ;
-                    }
-                    munmap (f_mmap, remain) ;
-                    
-                    resp_buf->f_offset += ret ;
-                }
-                else
-                {
-                    if (_sendfile(cfd, resp_buf->fd, &resp_buf->f_offset, min(MAX_SEND, resp_buf->f_size)) < 0)
-                    {
-                        LOG_ERROR("Error sending to client socket.\n");
-                        send_resp (500, NULL, resp_buf) ;
-                        continue ;
-                    }
-                }
-                
-                if (resp_buf->f_offset == resp_buf->f_size)
-                    clr_resp_buf (resp_buf, FILE_CLR) ;
-            }
-            
-            if (resp_buf->size == 0 && resp_buf->fd < 0)
-            {
-                // TODO 2 or more request were read at once
-                clr_req_buf (req_buf) ;
-                FD_CLR (cfd, &write_set) ;
-                
-                if (resp_buf->close)
-                    pool_remove (&pool, cfd) ;
+                fdpool_remove (&fdp, cgi->out, WRITE_FD) ;
+                close (cgi->out) ;
             }
         }
     }
 }
 
+int accept_client (int listenfd, SSL *ssl)
+{
+    int client_sock ;
+    socklen_t cli_size ;
+    struct sockaddr_in cli_addr ;
+    
+    cli_size = sizeof(cli_addr) ;
+    if ((client_sock = accept(listenfd, (struct sockaddr *) &cli_addr,
+                                &cli_size)) == -1)
+        return -1 ;
+
+    if (ssl)
+    {
+        SSL_set_fd (ssl, client_sock) ;
+        if (SSL_accept(ssl) < 0)
+        {
+            LOG_ERROR("Faild to create SSL connection.") ;
+            close_socket (client_sock) ;
+            return -1 ;
+        }
+    }
+
+    fcntl (client_sock, F_SETFL, O_NONBLOCK) ;
+    cpool_add (&cpool, client_sock, ssl) ;
+    fdpool_add (&fdp, client_sock, READ_FD) ;
+    
+    return client_sock ;
+}
+
 int main(int argc, char* argv[])
 {
-    int client_sock, maxfd ;
-    struct sockaddr_in cli_addr;
-    socklen_t cli_size ;
-    fd_set ready_read, ready_write ;
+    int client_sock ;
     SSL *ssl;
     
-    if (server_init (argc, argv) < 0)
-        return EXIT_FAILURE ;
+    server_init (argc, argv) ;
     
-    /* finally, loop waiting for input and then write it back */
-    LOG_INFO ("Event loop begin.") ;
     while (1)
     {
-        ready_read = read_set ;
-        ready_write = write_set ;
-        maxfd = max (max(pool.maxfd, pool.maxfd),
-                    max(http_listenfd, https_listenfd)) ;
-        select (maxfd + 1, &ready_read, &ready_write, NULL, NULL) ;
+        wait_event (&fdp) ;
         
-        if (FD_ISSET(http_listenfd, &ready_read))
-        {
-            cli_size = sizeof(cli_addr) ;
-            if ((client_sock = accept(http_listenfd, (struct sockaddr *) &cli_addr,
-                                        &cli_size)) == -1)
+        if (readable(&fdp, http_listenfd))
+            if ((client_sock = accept_client(http_listenfd, NULL)) < 0)
             {
                 LOG_ERROR("Error accepting HTTP connection.") ;
                 continue ;
             }
-            
-            fcntl (client_sock, F_SETFL, O_NONBLOCK) ;
-            pool_add (&pool, client_sock, NULL) ;
-        }
         
-        if (FD_ISSET(https_listenfd, &ready_read))
+        if (readable(&fdp, https_listenfd))
         {
-            cli_size = sizeof(cli_addr) ;
-            if ((client_sock = accept(https_listenfd, (struct sockaddr *) &cli_addr,
-                                        &cli_size)) == -1)
-            {
-                LOG_ERROR("Error accepting HTTPS connection.") ;
-                continue ;
-            }
-
             ssl = SSL_new(ssl_ctx) ;
-            SSL_set_fd (ssl, client_sock) ;
-            if (SSL_accept(ssl) < 0)
+            if ((client_sock = accept_client(https_listenfd, ssl)) < 0)
             {
-                LOG_ERROR("Faild to create SSL connection.") ;
-                close_socket (client_sock) ;
+                LOG_ERROR("Error accepting HTTP connection.") ;
                 continue ;
             }
-
-            fcntl (client_sock, F_SETFL, O_NONBLOCK) ;
-            pool_add (&pool, client_sock, ssl) ;
         }
         
-        handle_clients (&ready_read, &ready_write) ;
+        handle_clients () ;
     }
 
-    close_socket(http_listenfd);
-    SSL_CTX_free (ssl_ctx) ;
-
-    return EXIT_SUCCESS;
+    server_shutdown (EXIT_SUCCESS) ;
 }

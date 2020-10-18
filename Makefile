@@ -4,8 +4,9 @@ OBJ_DIR := obj
 SRC := $(wildcard $(SRC_DIR)/*.c)
 # all objects
 PARSE = $(OBJ_DIR)/parse.o $(OBJ_DIR)/y.tab.o $(OBJ_DIR)/lex.yy.o
-LIB = $(OBJ_DIR)/cpool.o $(OBJ_DIR)/http.o
-OBJ = $(OBJ_DIR)/lisod.o $(LIB) $(PARSE)
+IO = $(OBJ_DIR)/cpool.o $(OBJ_DIR)/fdpool.o $(OBJ_DIR)/cio.o
+HTTP = $(OBJ_DIR)/http.o $(OBJ_DIR)/cgi.o
+OBJ = $(OBJ_DIR)/lisod.o $(IO) $(HTTP) $(PARSE)
 # all binaries
 BIN := lisod
 # C compiler

@@ -6,17 +6,17 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include "http.h"
-#include "parse.h"
-#include "cpool.h"
 #include "log.h"
 
-extern char *www_folder ;
+extern char *www_folder, *cgi_folder ;
+extern int http_port ;
 
 char status_msg[506][50] = {
 	[200] = "OK",
 	[400] = "Bad Request",
 	[404] = "Not Found",
 	[411] = "Length Required",
+	[405] = "Method Not Allowed",
 	[500] = "Internal Server Error",
 	[501] = "Not Implemented",
 	[505] = "HTTP Version Not Supported"
@@ -43,12 +43,22 @@ void free_response (Response *resp)
 	free (resp) ;
 }
 
-void send_resp (const int scode, Response *resp, resp_buffer *resp_buf)
+void write_resp (const int scode, Response *resp, resp_buffer *resp_buf)
 {
 	int i ;
+	char date[256] ;
+	time_t timep ;
+	struct tm *gmp ;
 	
 	if (resp == NULL)
 		resp = new_response() ;
+	
+	fill_header("Server", SERVER_NAME, resp) ;
+	
+	time (&timep) ;
+	gmp = gmtime (&timep) ;
+	strftime(date, 256, "%a, %d %b %Y %H:%M:%S %Z", gmp) ;
+	fill_header("Date", date, resp) ;
 	
 	// TODO check if buf full
 	resp_buf->size = sprintf (resp_buf->buf, "%s %d %s\r\n", HTTP_VERSION, scode, status_msg[scode]) ;
@@ -125,7 +135,6 @@ void handle_head (const Request *req, resp_buffer *resp_buf)
 	const char *ext ;
 	Response *resp ;
 	struct stat st ;
-	time_t timep ;
 	struct tm *gmp ;
 	
 	// TODO check req_file full
@@ -139,13 +148,11 @@ void handle_head (const Request *req, resp_buffer *resp_buf)
 	
 	if (access(req_path, F_OK | R_OK) < 0)
 	{
-		send_resp(404, NULL, resp_buf) ;
+		write_resp(404, NULL, resp_buf) ;
 		return ;
 	}
 	
 	resp = new_response() ;
-	
-	fill_header("Server", SERVER_STR, resp) ;
 	
 	get_mime (req_path, mime) ;
 	fill_header("Content-Type", mime, resp) ;
@@ -153,25 +160,72 @@ void handle_head (const Request *req, resp_buffer *resp_buf)
 	stat (req_path, &st) ;
 	gmp = gmtime (&st.st_mtime) ;
 	strftime(date, 256, "%a, %d %b %Y %H:%M:%S %Z", gmp) ;
+	fill_header("Last-Modified", date, resp) ;
 	sprintf(f_size, "%lld", st.st_size) ;
 	fill_header("Content-Length", f_size, resp) ;
-	fill_header("Last-Modified", date, resp) ;
 	
-	time (&timep) ;
-	gmp = gmtime (&timep) ;
-	strftime(date, 256, "%a, %d %b %Y %H:%M:%S %Z", gmp);
-	fill_header("Date", date, resp) ;
-	
-	send_resp(200, resp, resp_buf) ;
+	write_resp(200, resp, resp_buf) ;
 }
 
-void handle_get (const Request *req, resp_buffer *resp_buf)
+void handle_cgi (const Request *req, resp_buffer *resp_buf)
+{
+	char req_path[4096], port_str[8], *argv[2] ;
+	char *cgi_filename, *cgi_query ;
+	CGI_envp *cgi_envp ;
+	
+	// TODO check req_file full
+	strcpy (req_path, cgi_folder) ;
+	// TODO www_folder may end by '/'
+	strcat (req_path, req->http_uri + 4) ;
+	
+	cgi_filename = get_cgi_filename(req_path) ;
+	cgi_query = get_cgi_query (req_path) ;
+	
+	if (access(cgi_filename, F_OK | R_OK) < 0)
+	{
+		write_resp(404, NULL, resp_buf) ;
+		return ;
+	}
+	
+	if ((cgi_envp = new_cgi_envp ()) == NULL)
+	{
+		LOG_ERROR ("Can not alloc envp for cgi.") ;
+		return ;
+	}
+	
+	fill_cgi_envp (cgi_envp, "REQUEST_METHOD", "GET") ;
+	if (cgi_query)
+		fill_cgi_envp (cgi_envp, "QUERY_STRING", cgi_query) ;
+	fill_cgi_envp (cgi_envp, "SCRIPT_NAME", cgi_filename) ;
+	sprintf (port_str, "%d", http_port) ;
+	fill_cgi_envp (cgi_envp, "SERVER_PORT", port_str) ;
+	fill_cgi_envp (cgi_envp, "HTTP_ACCEPT", get_header(req, "Accept")) ;
+	fill_cgi_envp (cgi_envp, "SERVER_PROTOCOL", HTTP_VERSION) ;
+	fill_cgi_envp (cgi_envp, "SERVER_NAME", SERVER_NAME) ;
+	fill_cgi_envp (cgi_envp, "SERVER_SOFTWARE", SERVER_NAME) ;
+	fill_cgi_envp (cgi_envp, "GATEWAY_INTERFACE", CGI_VERSION) ;
+	fill_cgi_envp (cgi_envp, "REMOTE_ADDR", "127.0.0.1") ;
+	fill_cgi_envp (cgi_envp, "REMOTE_HOST", "localhost") ;
+	
+	argv[0] = cgi_filename ;
+	argv[1] = NULL ;
+	
+	if ((resp_buf->cgi = new_cgi(argv, cgi_envp)) == NULL)
+	{
+		LOG_ERROR ("Faild to create CGI [%s].", req_path) ;
+		// TODO reply
+		return ;
+	}
+	
+	free_cgi_envp (cgi_envp) ;
+}
+
+void handle_static (const Request *req, resp_buffer *resp_buf)
 {
 	char req_path[4096], mime[64], date[256], f_size[16] ;
 	const char *ext ;
 	Response *resp ;
 	struct stat st ;
-	time_t timep ;
 	struct tm *gmp ;
 	
 	// TODO check req_file full
@@ -185,13 +239,11 @@ void handle_get (const Request *req, resp_buffer *resp_buf)
 	
 	if (access(req_path, F_OK | R_OK) < 0)
 	{
-		send_resp(404, NULL, resp_buf) ;
+		write_resp(404, NULL, resp_buf) ;
 		return ;
 	}
 	
 	resp = new_response() ;
-	
-	fill_header("Server", SERVER_STR, resp) ;
 	
 	get_mime (req_path, mime) ;
 	fill_header("Content-Type", mime, resp) ;
@@ -199,43 +251,52 @@ void handle_get (const Request *req, resp_buffer *resp_buf)
 	stat (req_path, &st) ;
 	gmp = gmtime (&st.st_mtime) ;
 	strftime(date, 256, "%a, %d %b %Y %H:%M:%S %Z", gmp) ;
+	fill_header("Last-Modified", date, resp) ;
 	sprintf(f_size, "%lld", st.st_size) ;
 	fill_header("Content-Length", f_size, resp) ;
-	fill_header("Last-Modified", date, resp) ;
-	
-	time (&timep) ;
-	gmp = gmtime (&timep) ;
-	strftime(date, 256, "%a, %d %b %Y %H:%M:%S %Z", gmp);
-	fill_header("Date", date, resp) ;
 	
 	// TODO open failed
-	resp_buf->fd = open (req_path, O_RDONLY) ;
-	resp_buf->f_size = st.st_size ;
-	resp_buf->f_offset = 0 ;
+	resp_buf->resp_f.fd = open (req_path, O_RDONLY) ;
+	resp_buf->resp_f.size = st.st_size ;
+	resp_buf->resp_f.offset = 0 ;
 	
-	send_resp(200, resp, resp_buf) ;
+	write_resp(200, resp, resp_buf) ;
 }
 
 void handle_post (const Request *req, const char *post_buf, size_t body_size, resp_buffer *resp_buf)
 {
 	if (body_size == 0)
 	{
-		send_resp(411, NULL, resp_buf) ;
+		write_resp(411, NULL, resp_buf) ;
 		return ;
 	}
 	
-	// TODO
+	if (strncmp(req->http_uri, "/cgi/", 5))
+	{
+		write_resp (405, NULL, resp_buf) ;
+		return ;
+	}
+	
+	handle_cgi (req, resp_buf) ;
 }
 
-void handle_request (req_buffer *req_buf, resp_buffer *resp_buf)
+void handle_get (const Request *req, resp_buffer *resp_buf)
+{
+	if (!strncmp(req->http_uri, "/cgi/", 5))
+		handle_cgi (req, resp_buf) ;
+	else
+		handle_static (req, resp_buf) ;
+}
+
+bool handle_request (req_buffer *req_buf, resp_buffer *resp_buf)
 {
 	char *connection ;
 	Request *req = req_buf->req ;
 	
 	if (strcmp(req->http_version, HTTP_VERSION))
 	{
-		send_resp (505, NULL, resp_buf) ;
-		return ;
+		write_resp (505, NULL, resp_buf) ;
+		return 0 ;
 	}
 	
 	if (!strcmp(req->http_method, "GET"))
@@ -246,11 +307,13 @@ void handle_request (req_buffer *req_buf, resp_buffer *resp_buf)
 		handle_head (req, resp_buf) ;
 	else
 	{
-		send_resp (501, NULL, resp_buf) ;
-		return ;
+		write_resp (501, NULL, resp_buf) ;
+		return 0 ;
 	}
 	
 	connection = get_header (req, "Connection") ;
 	if (connection && !strcmp(connection, "Close"))
-		resp_buf->close = true ;
+		return 1 ;
+		
+	return 0 ;
 }

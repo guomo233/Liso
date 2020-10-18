@@ -2,6 +2,7 @@
 #define LOG_H
 
 #include <time.h>
+#include <stdio.h>
 
 #define LOG_LEVEL 0
 
