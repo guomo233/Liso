@@ -72,12 +72,12 @@ void fdpool_remove (fd_pool *fdp, int fd, int type)
 	}
 }
 
-bool readable (fd_pool *fdp, int fd)
+static bool readable (fd_pool *fdp, int fd)
 {
 	return FD_ISSET (fd, &fdp->ready_read) ;
 }
 
-bool writeable (fd_pool *fdp, int fd)
+static bool writeable (fd_pool *fdp, int fd)
 {
 	return FD_ISSET (fd, &fdp->ready_write) ;
 }

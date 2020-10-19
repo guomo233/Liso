@@ -27,8 +27,6 @@ typedef struct
 void fdpool_remove (fd_pool *fdp, int fd, int type) ;
 void fdpool_add (fd_pool *fdp, int fd, int type, fd_event evt) ;
 void fdpool_init (fd_pool *fdp) ;
-bool readable (fd_pool *fdp, int fd) ;
-bool writeable (fd_pool *fdp, int fd) ;
 void event_loop (fd_pool *fdp) ;
 
 #endif
