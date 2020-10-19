@@ -1,6 +1,8 @@
 #include <stdlib.h>
 #include "fdpool.h"
 
+static fd_event rd_evt[FD_SETSIZE], wr_evt[FD_SETSIZE] ;
+
 static int max (int a, int b)
 {
 	return a > b ? a : b ;
@@ -21,7 +23,7 @@ void fdpool_init (fd_pool *fdp)
 	fdp->maxfd = 0 ;
 }
 
-void fdpool_add (fd_pool *fdp, int fd, int type)
+void fdpool_add (fd_pool *fdp, int fd, int type, fd_event evt)
 {
 	if (!FD_ISSET(fd, &fdp->read_set) && !FD_ISSET(fd, &fdp->write_set))
 	{
@@ -30,10 +32,16 @@ void fdpool_add (fd_pool *fdp, int fd, int type)
 	}
 	
 	if (type & READ_FD)
+	{
 		FD_SET (fd, &fdp->read_set) ;
+		rd_evt[fd] = evt ;
+	}
 		
 	if (type & WRITE_FD)
+	{
 		FD_SET (fd, &fdp->write_set) ;
+		wr_evt[fd] = evt ;
+	}
 }
 
 void fdpool_remove (fd_pool *fdp, int fd, int type)
@@ -74,9 +82,23 @@ bool writeable (fd_pool *fdp, int fd)
 	return FD_ISSET (fd, &fdp->ready_write) ;
 }
 
-void wait_event (fd_pool *fdp)
+void event_loop (fd_pool *fdp)
 {
-	fdp->ready_read = fdp->read_set ;
-	fdp->ready_write = fdp->write_set ;
-	select (fdp->maxfd + 1, &fdp->ready_read, &fdp->ready_write, NULL, NULL) ;
+	int i ;
+	
+	while (1)
+	{
+		fdp->ready_read = fdp->read_set ;
+		fdp->ready_write = fdp->write_set ;
+		select (fdp->maxfd + 1, &fdp->ready_read, &fdp->ready_write, NULL, NULL) ;
+		
+		for (i = 0; i < fdp->n_fd; i++)
+		{
+			if (readable(fdp, fdp->fd[i]))
+				rd_evt[fdp->fd[i]].callback (fdp->fd[i], rd_evt[fdp->fd[i]].arg) ;
+				
+			if (writeable(fdp, fdp->fd[i]))
+				wr_evt[fdp->fd[i]].callback (fdp->fd[i], wr_evt[fdp->fd[i]].arg) ;
+		}
+	}
 }

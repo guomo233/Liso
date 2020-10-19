@@ -9,6 +9,12 @@
 
 typedef struct
 {
+	void (*callback) (int fd, void *arg) ;
+	void *arg ;
+} fd_event ;
+
+typedef struct
+{
 	int maxfd ;
 	fd_set read_set ;
 	fd_set write_set ;
@@ -19,10 +25,10 @@ typedef struct
 } fd_pool ;
 
 void fdpool_remove (fd_pool *fdp, int fd, int type) ;
-void fdpool_add (fd_pool *fdp, int fd, int type) ;
+void fdpool_add (fd_pool *fdp, int fd, int type, fd_event evt) ;
 void fdpool_init (fd_pool *fdp) ;
 bool readable (fd_pool *fdp, int fd) ;
 bool writeable (fd_pool *fdp, int fd) ;
-void wait_event (fd_pool *fdp) ;
+void event_loop (fd_pool *fdp) ;
 
 #endif

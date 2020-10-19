@@ -1,6 +1,7 @@
+#include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <string.h>
 #include "cgi.h"
 #include "log.h"
 
@@ -58,15 +59,6 @@ int fill_cgi_envp (CGI_envp *cgi_envp, const char *name, const char *value)
 	return 0 ;
 }
 
-char *get_cgi_filename (char *req_path)
-{
-	char *qmark = strstr (req_path, "?") ;
-	
-	if (qmark)
-		*qmark = '\0' ;
-	return req_path ;
-}
-
 char *get_cgi_query (char *req_path)
 {
 	char *qmark = strstr (req_path, "?") ;
@@ -121,9 +113,6 @@ CGI *new_cgi (char *argv[], CGI_envp *cgi_envp)
 		cgi = (CGI *) malloc (sizeof(CGI)) ;
 		cgi->in = stdout_pipe[0] ;
 		cgi->out = stdin_pipe[1] ;
-		cgi->in_done = false ;
-		cgi->in_buf = NULL ;
-		cgi->out_buf = NULL ;
 	}
 	
 	return cgi ;
