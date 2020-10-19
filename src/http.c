@@ -22,6 +22,112 @@ char status_msg[506][50] = {
 	[505] = "HTTP Version Not Supported"
 } ;
 
+static int min (int a, int b)
+{
+	return a < b ? a : b ;
+}
+
+void free_req_buf (req_buffer *req_buf)
+{
+	free (req_buf->buf) ;
+}
+
+void free_resp_buf (resp_buffer *resp_buf)
+{
+	free (resp_buf->buf) ;
+}
+
+int init_req_buf (req_buffer *req_buf)
+{
+	req_buf->size = 0 ;
+	req_buf->offset = 0 ;
+	req_buf->header_size = 0 ;
+	req_buf->body_size = 0 ;
+	req_buf->req = NULL ;
+	req_buf->capacity = BUF_SIZE ;
+	req_buf->buf = (char *) malloc (BUF_SIZE) ;
+	if (!req_buf->buf)
+	{
+		LOG_ERROR ("Can not alloc memory for client.") ;
+		return -1 ;
+	}
+	
+	return 0 ;
+}
+
+int init_resp_buf (resp_buffer *resp_buf)
+{
+	resp_buf->cgi = NULL ;
+	resp_buf->resp_f.fd = -1 ;
+	resp_buf->resp_f.offset = 0 ;
+	resp_buf->resp_f.size = 0 ;
+	resp_buf->size = 0 ;
+	resp_buf->offset = 0 ;
+	resp_buf->capacity = BUF_SIZE ;
+	resp_buf->buf = (char *) malloc (BUF_SIZE) ;
+	if (!resp_buf->buf)
+	{
+		LOG_ERROR ("Can not alloc memory for client.") ;
+		return -1 ;
+	}
+	
+	return 0 ;
+}
+
+int parse_req (req_buffer *req_buf)
+{
+	char *body_size ;
+	int parse_ret ;
+	
+	if (req_buf->req)
+		return SUCCESS ;
+	
+	req_buf->req = parse (req_buf->buf, min(req_buf->size, 8192), &req_buf->header_size, &parse_ret) ;
+	
+	if (req_buf->req)
+	{
+		body_size = get_header (req_buf->req, "Content-Length") ;
+		req_buf->body_size = body_size ? atoi (body_size) : 0 ;
+		// TODO check valid of content length
+		return SUCCESS ;
+	}
+	else if (req_buf->size > 8192 || parse_ret == BAD_REQ)
+	// TODO receive is done ( < 8192) but can not parse
+		return BAD_REQ ;
+		
+	return REQ_UNFIN ;
+}
+
+void clr_req_buf (req_buffer *req_buf)
+{
+	req_buf->size = 0 ;
+	req_buf->header_size = 0 ;
+	req_buf->body_size = 0 ;
+	if (req_buf->req) free_request (req_buf->req) ;
+	req_buf->req = NULL ;
+}
+
+void clr_resp_buf (resp_buffer *resp_buf)
+{
+	resp_buf->size = 0 ;
+	resp_buf->offset = 0 ;
+	
+	resp_buf->resp_f.offset = 0 ;
+	resp_buf->resp_f.size = 0 ;
+	if (resp_buf->resp_f.fd > 0)
+	{
+		close (resp_buf->resp_f.fd) ;
+		resp_buf->resp_f.fd = -1 ;
+	}
+	
+	if (resp_buf->cgi)
+	{
+		if (resp_buf->cgi->out_buf) free (resp_buf->cgi->out_buf) ;
+		free_cgi (resp_buf->cgi) ;
+		resp_buf->cgi = NULL ;
+	}
+}
+
 Response *new_response ()
 {
 	Response *resp = (Response *) malloc (sizeof(Response)) ;
@@ -43,7 +149,7 @@ void free_response (Response *resp)
 	free (resp) ;
 }
 
-void write_resp (const int scode, Response *resp, resp_buffer *resp_buf)
+void write_resp (int scode, Response *resp, resp_buffer *resp_buf)
 {
 	int i ;
 	char date[256] ;
@@ -70,7 +176,7 @@ void write_resp (const int scode, Response *resp, resp_buffer *resp_buf)
 	free_response(resp) ;
 }
 
-int fill_header (const char *name, const char *value, Response *resp)
+int fill_header (char *name, char *value, Response *resp)
 {
 	if (resp->header_count == resp->header_capacity)
 	{
@@ -89,7 +195,7 @@ int fill_header (const char *name, const char *value, Response *resp)
 	return 0 ;
 }
 
-char *get_header (const Request *req, const char *name)
+char *get_header (Request *req, char *name)
 {
 	int i ;
 	
@@ -101,9 +207,9 @@ char *get_header (const Request *req, const char *name)
 	return NULL ;
 }
 
-const char *get_ext (const char *filename)
+char *get_ext (char *filename)
 {
-	const char *ext = filename + strlen(filename) - 1 ;
+	char *ext = filename + strlen(filename) - 1 ;
 	for (; ext >= filename; ext--)
 		if (*ext == '.')
 			return ext + 1 ;
@@ -111,9 +217,9 @@ const char *get_ext (const char *filename)
 	return NULL ;
 }
 
-void get_mime (const char *filename, char *mime)
+void get_mime (char *filename, char *mime)
 {
-	const char *ext = get_ext (filename) ;
+	char *ext = get_ext (filename) ;
 	
 	// TODO ext not exist
 	if (!strcmp(ext, "html"))
@@ -129,10 +235,10 @@ void get_mime (const char *filename, char *mime)
 	// TODO other
 }
 
-void handle_head (const Request *req, resp_buffer *resp_buf)
+void handle_head (Request *req, resp_buffer *resp_buf)
 {
 	char req_path[4096], mime[64], date[256], f_size[16] ;
-	const char *ext ;
+	char *ext ;
 	Response *resp ;
 	struct stat st ;
 	struct tm *gmp ;
@@ -167,7 +273,7 @@ void handle_head (const Request *req, resp_buffer *resp_buf)
 	write_resp(200, resp, resp_buf) ;
 }
 
-void handle_cgi (const Request *req, resp_buffer *resp_buf)
+void handle_cgi (Request *req, resp_buffer *resp_buf)
 {
 	char req_path[4096], port_str[8], *argv[2] ;
 	char *cgi_filename, *cgi_query ;
@@ -217,13 +323,14 @@ void handle_cgi (const Request *req, resp_buffer *resp_buf)
 		return ;
 	}
 	
+	resp_buf->cgi->in_buf = (CGI_buffer *) resp_buf ;
 	free_cgi_envp (cgi_envp) ;
 }
 
-void handle_static (const Request *req, resp_buffer *resp_buf)
+void handle_static (Request *req, resp_buffer *resp_buf)
 {
 	char req_path[4096], mime[64], date[256], f_size[16] ;
-	const char *ext ;
+	char *ext ;
 	Response *resp ;
 	struct stat st ;
 	struct tm *gmp ;
@@ -263,7 +370,7 @@ void handle_static (const Request *req, resp_buffer *resp_buf)
 	write_resp(200, resp, resp_buf) ;
 }
 
-void handle_post (const Request *req, const char *post_buf, size_t body_size, resp_buffer *resp_buf)
+void handle_post (Request *req, char *post_buf, size_t body_size, resp_buffer *resp_buf)
 {
 	if (body_size == 0)
 	{
@@ -278,9 +385,14 @@ void handle_post (const Request *req, const char *post_buf, size_t body_size, re
 	}
 	
 	handle_cgi (req, resp_buf) ;
+	resp_buf->cgi->out_buf = (CGI_buffer *) malloc (sizeof(CGI_buffer)) ;
+	resp_buf->cgi->out_buf->buf = post_buf ;
+	resp_buf->cgi->out_buf->capacity = body_size ;
+	resp_buf->cgi->out_buf->size = body_size ;
+	resp_buf->cgi->out_buf->offset = 0 ;
 }
 
-void handle_get (const Request *req, resp_buffer *resp_buf)
+void handle_get (Request *req, resp_buffer *resp_buf)
 {
 	if (!strncmp(req->http_uri, "/cgi/", 5))
 		handle_cgi (req, resp_buf) ;

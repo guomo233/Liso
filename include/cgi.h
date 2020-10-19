@@ -7,9 +7,19 @@
 
 typedef struct
 {
+	char *buf ;
+	size_t size ;
+	off_t offset ;
+	size_t capacity ;
+} CGI_buffer ;
+
+typedef struct
+{
 	int in ;
 	int out ;
 	bool in_done ;
+	CGI_buffer *in_buf ;
+	CGI_buffer *out_buf ;
 } CGI ;
 
 typedef struct

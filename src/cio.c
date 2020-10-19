@@ -2,7 +2,6 @@
 #include <unistd.h>
 #include "cio.h"
 #include "log.h"
-#include "http.h"
 
 #ifdef __APPLE__
 #include <sys/types.h>
@@ -24,58 +23,6 @@ static ssize_t _sendfile (int out_fd, int in_fd, off_t *offset, size_t count)
 #include <sys/sendfile.h>
 #define _sendfile sendfile
 #endif
-
-static int min (int a, int b)
-{
-	return a < b ? a : b ;
-}
-
-void free_req_buf (req_buffer *req_buf)
-{
-	free (req_buf->buf) ;
-}
-
-void free_resp_buf (resp_buffer *resp_buf)
-{
-	free (resp_buf->buf) ;
-}
-
-int init_req_buf (req_buffer *req_buf)
-{
-	req_buf->size = 0 ;
-	req_buf->offset = 0 ;
-	req_buf->header_size = 0 ;
-	req_buf->body_size = 0 ;
-	req_buf->req = NULL ;
-	req_buf->capacity = BUF_SIZE ;
-	req_buf->buf = (char *) malloc (BUF_SIZE) ;
-	if (!req_buf->buf)
-	{
-		LOG_ERROR ("Can not alloc memory for client.") ;
-		return -1 ;
-	}
-	
-	return 0 ;
-}
-
-int init_resp_buf (resp_buffer *resp_buf)
-{
-	resp_buf->cgi = NULL ;
-	resp_buf->resp_f.fd = -1 ;
-	resp_buf->resp_f.offset = 0 ;
-	resp_buf->resp_f.size = 0 ;
-	resp_buf->size = 0 ;
-	resp_buf->offset = 0 ;
-	resp_buf->capacity = BUF_SIZE ;
-	resp_buf->buf = (char *) malloc (BUF_SIZE) ;
-	if (!resp_buf->buf)
-	{
-		LOG_ERROR ("Can not alloc memory for client.") ;
-		return -1 ;
-	}
-	
-	return 0 ;
-}
 
 bool req_read_done (req_buffer *req_buf)
 {
@@ -105,30 +52,6 @@ bool resp_tobe_send (resp_buffer *resp_buf)
 bool resp_send_done (resp_buffer *resp_buf)
 {
 	return buf_send_done (resp_buf) && file_send_done (resp_buf) && cgi_send_done (resp_buf) ;
-}
-
-int parse_req (req_buffer *req_buf)
-{
-	const char *body_size ;
-	int parse_ret ;
-	
-	if (req_buf->req)
-		return SUCCESS ;
-	
-	req_buf->req = parse (req_buf->buf, min(req_buf->size, 8192), &req_buf->header_size, &parse_ret) ;
-	
-	if (req_buf->req)
-	{
-		body_size = get_header (req_buf->req, "Content-Length") ;
-		req_buf->body_size = body_size ? atoi (body_size) : 0 ;
-		// TODO check valid of content length
-		return SUCCESS ;
-	}
-	else if (req_buf->size > 8192 || parse_ret == BAD_REQ)
-	// TODO receive is done ( < 8192) but can not parse
-		return BAD_REQ ;
-		
-	return REQ_UNFIN ;
 }
 
 int read_req (int fd, req_buffer *req_buf, SSL *ssl)
@@ -216,27 +139,4 @@ int send_file (int fd, resp_file *resp_f, SSL *ssl)
 	
 	LOG_INFO ("Send file %d bytes.", ret) ;
 	return ret ;
-}
-
-void clr_req_buf (req_buffer *req_buf)
-{
-	req_buf->size = 0 ;
-	req_buf->header_size = 0 ;
-	req_buf->body_size = 0 ;
-	if (req_buf->req) free_request (req_buf->req) ;
-	req_buf->req = NULL ;
-}
-
-void clr_resp_buf (resp_buffer *resp_buf)
-{
-	resp_buf->size = 0 ;
-	resp_buf->offset = 0 ;
-	
-	resp_buf->resp_f.offset = 0 ;
-	resp_buf->resp_f.size = 0 ;
-	if (resp_buf->resp_f.fd > 0) close (resp_buf->resp_f.fd) ;
-	resp_buf->resp_f.fd = -1 ;
-	
-	if (resp_buf->cgi) free_cgi (resp_buf->cgi) ;
-	resp_buf->cgi = NULL ;
 }

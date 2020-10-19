@@ -242,7 +242,7 @@ static void server_init (int argc, char* argv[])
         server_shutdown (EXIT_SUCCESS) ;
     }
     
-    daemonize (lock_file, fileno(logfile)) ;
+//    daemonize (lock_file, fileno(logfile)) ;
     
     if ((http_listenfd = open_listenfd(http_port)) < 0)
     {
@@ -314,11 +314,8 @@ static void handle_clients ()
                     
                 if (cpool.cli[i].resp_buf.cgi)
                 {
-                    if (cpool.cli[i].req_buf.body_size > 0)
-                    {
-                        cpool.cli[i].req_buf.offset = cpool.cli[i].req_buf.header_size ;
+                    if (cpool.cli[i].resp_buf.cgi->out_buf)
                         fdpool_add (&fdp, cpool.cli[i].resp_buf.cgi->out, WRITE_FD) ;
-                    }
                     fdpool_add (&fdp, cpool.cli[i].resp_buf.cgi->in, READ_FD) ;
                 }
             }

@@ -122,6 +122,8 @@ CGI *new_cgi (char *argv[], CGI_envp *cgi_envp)
 		cgi->in = stdout_pipe[0] ;
 		cgi->out = stdin_pipe[1] ;
 		cgi->in_done = false ;
+		cgi->in_buf = NULL ;
+		cgi->out_buf = NULL ;
 	}
 	
 	return cgi ;
